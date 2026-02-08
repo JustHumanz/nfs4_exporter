@@ -1,0 +1,28 @@
+# Binaries
+nfsd-tracer
+*.o
+*.so
+
+# BPF generated files
+nfsdtrace_bpfel.go
+nfsdtrace_bpfeb.go
+nfsdtrace_bpfel.o
+nfsdtrace_bpfeb.o
+
+# VMLinux header (generated)
+vmlinux.h
+
+# Go build artifacts
+*.test
+*.prof
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
