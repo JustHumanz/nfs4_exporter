@@ -197,7 +197,7 @@ ls /lib/modules/$(uname -r)/build
 
 ## License
 
-[Your License Here]
+Idk, just usr it lol
 
 ## Contributing
 
