@@ -47,7 +47,7 @@ COPY . .
 
 # Generate vmlinux.h if not present
 RUN if [ ! -f vmlinux.h ]; then \
-    apt-get update && apt-get install -y linux-tools-generic && \
+    apt-get update && apt-get install -y linux-tools-generic bpftool && \
     bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h || \
     echo "Warning: Could not generate vmlinux.h, using existing one"; \
     fi
