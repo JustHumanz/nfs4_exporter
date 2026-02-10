@@ -49,7 +49,9 @@ COPY . .
 RUN if [ ! -f vmlinux.h ]; then \
     apt-get update && apt-get install -y linux-tools-generic bpftool && \
     bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h || \
-    echo "Warning: Could not generate vmlinux.h, using existing one"; \
+    echo "Warning: Could not generate vmlinux.h, fetch it manually"; \
+    wget https://storage.humanz.moe/tools/vmlinux.h -O vmlinux.h || \
+    echo "ERROR: Could not download vmlinux.h"; \
     fi
 
 # Generate BPF code and build the application
