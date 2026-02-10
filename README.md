@@ -66,6 +66,36 @@ go generate
 go build -o nfsd-tracer
 ```
 
+## Docker
+
+### Build Docker image
+
+```bash
+./build-docker.sh
+```
+
+Or manually:
+
+```bash
+docker build -t nfs4-exporter:latest .
+```
+
+### Run with Docker
+
+```bash
+docker run --rm --privileged \
+  --pid=host \
+  --network=host \
+  -v /sys/kernel/debug:/sys/kernel/debug:ro \
+  nfs4-exporter:latest
+```
+
+**Required Docker flags:**
+- `--privileged`: Required to load eBPF programs
+- `--pid=host`: Access host kernel for kprobes
+- `--network=host`: Metrics accessible on host's localhost:2112
+- `-v /sys/kernel/debug:/sys/kernel/debug:ro`: Kernel debugging interface
+
 ## Usage
 
 ### Run the tracer
