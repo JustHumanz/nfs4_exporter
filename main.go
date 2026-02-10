@@ -123,6 +123,13 @@ func main() {
 	defer kpNfsd3Write.Close()
 	log.Println("Attached kprobe to nfsd3_proc_write")
 
+	// Attach kprobe for nfsd3_proc_read
+	kpNfsd3Read, err := link.Kprobe("nfsd3_proc_read", objs.KprobeNfsd3ProcRead, nil)
+	if err != nil {
+		log.Fatalf("opening kprobe nfsd3_proc_read: %v", err)
+	}
+	defer kpNfsd3Read.Close()
+	log.Println("Attached kprobe to nfsd3_proc_read")
 
 	// Open a perf event reader from the events map
 	rd, err := perf.NewReader(objs.Events, 4096)
