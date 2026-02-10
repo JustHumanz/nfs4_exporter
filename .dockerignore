@@ -1,0 +1,25 @@
+# Docker ignore patterns
+.git
+.gitignore
+.gitmodules
+README.md
+*.md
+
+# Build artifacts
+nfsd-tracer
+nfsdtrace_bpfeb.go
+nfsdtrace_bpfel.go
+nfsdtrace_bpfeb.o
+nfsdtrace_bpfel.o
+
+# Go artifacts
+*.o
+*.a
+*.so
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
