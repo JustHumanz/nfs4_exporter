@@ -9,6 +9,7 @@ A high-performance NFS server monitoring tool built with eBPF that tracks read/w
 - 🔍 **Zero overhead** - runs in kernel space
 - 📈 **Detailed statistics** - bytes transferred, operation counts per client/path
 - 🎯 **NFSv4 support** - tracks `nfsd4_read` and `nfsd4_write` operations
+- 🧩 **NFSv3 support** - tracks `nfsd3_proc_write` (bytes and ops)
 
 ## Requirements
 
@@ -32,7 +33,7 @@ sudo apt install -y clang llvm libelf-dev libbpf-dev \
 ### Clone with submodules
 
 ```bash
-git clone --recurse-submodules <repository-url>
+git clone --recurse-submodules git@github.com:JustHumanz/nfs4_exporter.git
 cd nfs-ebpf
 ```
 
@@ -61,6 +62,7 @@ bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
 ### Build the tracer
 
 ```bash
+go generate
 go build -o nfsd-tracer
 ```
 
@@ -73,7 +75,7 @@ sudo ./nfsd-tracer
 ```
 
 The tracer will:
-1. Attach kprobes to `nfsd4_read` and `nfsd4_write`
+1. Attach kprobes to `nfsd4_read`, `nfsd4_write`, and `nfsd3_proc_write`
 2. Start a Prometheus metrics server on port 2112
 3. Print NFS operations to stdout as they occur
 
@@ -97,31 +99,50 @@ The tracer exposes the following metrics at `http://localhost:2112/metrics`:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `nfs_read_bytes_total` | Counter | `client`, `path` | Total bytes read from NFS |
-| `nfs_write_bytes_total` | Counter | `client`, `path` | Total bytes written to NFS |
-| `nfs_read_operations_total` | Counter | `client`, `path` | Total number of read operations |
-| `nfs_write_operations_total` | Counter | `client`, `path` | Total number of write operations |
+| `nfs4_read_bytes_total` | Counter | `client`, `path`, `version` | Total bytes read from NFS v4 |
+| `nfs4_write_bytes_total` | Counter | `client`, `path`, `version` | Total bytes written to NFS v4 |
+| `nfs4_read_operations_total` | Counter | `client`, `path`, `version` | Total number of NFS v4 read operations |
+| `nfs4_write_operations_total` | Counter | `client`, `path`, `version` | Total number of NFS v4 write operations |
+| `nfs3_read_bytes_total` | Counter | `client`, `version` | Total bytes read from NFS v3 |
+| `nfs3_write_bytes_total` | Counter | `client`, `version` | Total bytes written to NFS v3 |
+| `nfs3_read_operations_total` | Counter | `client`, `version` | Total number of NFS v3 read operations |
+| `nfs3_write_operations_total` | Counter | `client`, `version` | Total number of NFS v3 write operations |
 
 ### Example Queries
 
-**Read throughput (bytes/sec) over 1 minute:**
+**Read throughput (bytes/sec) over 1 minute (NFS v4):**
 ```promql
-rate(nfs_read_bytes_total[1m])
+rate(nfs4_read_bytes_total[1m])
 ```
 
-**Write throughput per client:**
+**Write throughput per client (NFS v4):**
 ```promql
-sum by (client) (rate(nfs_write_bytes_total[1m]))
+sum by (client) (rate(nfs4_write_bytes_total[1m]))
 ```
 
-**Total I/O operations per second:**
+**Total I/O operations per second (NFS v4):**
 ```promql
-sum(rate(nfs_read_operations_total[1m])) + sum(rate(nfs_write_operations_total[1m]))
+sum(rate(nfs4_read_operations_total[1m])) + sum(rate(nfs4_write_operations_total[1m]))
 ```
 
-**Top paths by read traffic:**
+**Top paths by read traffic (NFS v4):**
 ```promql
-topk(5, sum by (path) (rate(nfs_read_bytes_total[1m])))
+topk(5, sum by (path) (rate(nfs4_read_bytes_total[1m])))
+```
+
+**Read throughput (bytes/sec) over 1 minute (NFS v3):**
+```promql
+rate(nfs3_read_bytes_total[1m])
+```
+
+**Write throughput per client (NFS v3):**
+```promql
+sum by (client) (rate(nfs3_write_bytes_total[1m]))
+```
+
+**Total I/O operations per second (NFS v3):**
+```promql
+sum(rate(nfs3_read_operations_total[1m])) + sum(rate(nfs3_write_operations_total[1m]))
 ```
 
 ### Scrape Configuration
@@ -161,10 +182,15 @@ go build -o nfsd-tracer
 
 ## How It Works
 
-1. **eBPF Program**: Attaches kprobes to kernel functions `nfsd4_read` and `nfsd4_write`
-2. **Data Collection**: Captures client IP, path, and bytes transferred for each operation
+1. **eBPF Program**: Attaches kprobes to kernel functions `nfsd4_read`, `nfsd4_write`, and `nfsd3_proc_write`
+2. **Data Collection**: Captures client IP and bytes transferred for each operation; path is captured for NFSv4 only
 3. **Perf Events**: Sends data from kernel to userspace via perf ring buffer
 4. **Metrics Export**: Aggregates data and exposes as Prometheus counters
+
+## Notes on NFSv3
+
+- NFSv3 does **not** include a stable, easily extractable export path in the same way as NFSv4.
+- As a result, **path metrics are not available for NFSv3**; metrics will be labeled by client only for NFSv3 operations.
 
 ## Troubleshooting
 
