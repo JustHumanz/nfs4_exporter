@@ -21,33 +21,64 @@ import (
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip nfsdtrace ./bpf/nfsd_trace.bpf.c -- -D__BPF_TRACING__ -D__TARGET_ARCH_x86 -O2 -g -target bpf -nostdinc -isystem /usr/lib/llvm-18/lib/clang/18/include -I. -I./libbpf/src -I./libbpf/include
 
 var (
-	nfsReadBytes = promauto.NewCounterVec(
+	// NFS v4 metrics (with path)
+	nfs4ReadBytes = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs_read_bytes_total",
-			Help: "Total bytes read from NFS by client and path",
+			Name: "nfs4_read_bytes_total",
+			Help: "Total bytes read from NFS v4 by client and path",
 		},
-		[]string{"client", "path"},
+		[]string{"client", "path", "version"},
 	)
-	nfsWriteBytes = promauto.NewCounterVec(
+	nfs4WriteBytes = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs_write_bytes_total",
-			Help: "Total bytes written to NFS by client and path",
+			Name: "nfs4_write_bytes_total",
+			Help: "Total bytes written to NFS v4 by client and path",
 		},
-		[]string{"client", "path"},
+		[]string{"client", "path", "version"},
 	)
-	nfsReadOperations = promauto.NewCounterVec(
+	nfs4ReadOperations = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs_read_operations_total",
-			Help: "Total number of NFS read operations by client and path",
+			Name: "nfs4_read_operations_total",
+			Help: "Total number of NFS v4 read operations by client and path",
 		},
-		[]string{"client", "path"},
+		[]string{"client", "path", "version"},
 	)
-	nfsWriteOperations = promauto.NewCounterVec(
+	nfs4WriteOperations = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs_write_operations_total",
-			Help: "Total number of NFS write operations by client and path",
+			Name: "nfs4_write_operations_total",
+			Help: "Total number of NFS v4 write operations by client and path",
 		},
-		[]string{"client", "path"},
+		[]string{"client", "path", "version"},
+	)
+
+	// NFS v3 metrics (without path)
+	nfs3ReadBytes = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "nfs3_read_bytes_total",
+			Help: "Total bytes read from NFS v3 by client",
+		},
+		[]string{"client", "version"},
+	)
+	nfs3WriteBytes = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "nfs3_write_bytes_total",
+			Help: "Total bytes written to NFS v3 by client",
+		},
+		[]string{"client", "version"},
+	)
+	nfs3ReadOperations = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "nfs3_read_operations_total",
+			Help: "Total number of NFS v3 read operations by client",
+		},
+		[]string{"client", "version"},
+	)
+	nfs3WriteOperations = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "nfs3_write_operations_total",
+			Help: "Total number of NFS v3 write operations by client",
+		},
+		[]string{"client", "version"},
 	)
 )
 
@@ -55,6 +86,7 @@ type DataT struct {
 	Op   uint32
 	Size uint32
 	Addr uint32
+	Version uint32
 	Path [64]byte
 }
 
@@ -81,6 +113,16 @@ func main() {
 	}
 	defer kpRead.Close()
 	log.Println("Attached kprobe to nfsd4_read")
+
+
+	// Attach kprobe for nfsd3_proc_write
+	kpNfsd3Write, err := link.Kprobe("nfsd3_proc_write", objs.KprobeNfsd3ProcWrite, nil)
+	if err != nil {
+		log.Fatalf("opening kprobe nfsd3_proc_write: %v", err)
+	}
+	defer kpNfsd3Write.Close()
+	log.Println("Attached kprobe to nfsd3_proc_write")
+
 
 	// Open a perf event reader from the events map
 	rd, err := perf.NewReader(objs.Events, 4096)
@@ -146,15 +188,30 @@ func main() {
 		// Determine operation and record metrics
 		op := "READ"
 		clientIP := ip.String()
-		if data.Op == 1 {
-			op = "WRITE"
-			nfsWriteBytes.WithLabelValues(clientIP, path).Add(float64(data.Size))
-			nfsWriteOperations.WithLabelValues(clientIP, path).Inc()
-		} else {
-			nfsReadBytes.WithLabelValues(clientIP, path).Add(float64(data.Size))
-			nfsReadOperations.WithLabelValues(clientIP, path).Inc()
+		version := fmt.Sprintf("%d", data.Version)
+		
+		if data.Version == 4 {
+			// NFS v4 metrics (with path)
+			if data.Op == 1 {
+				op = "WRITE"
+				nfs4WriteBytes.WithLabelValues(clientIP, path, version).Add(float64(data.Size))
+				nfs4WriteOperations.WithLabelValues(clientIP, path, version).Inc()
+			} else {
+				nfs4ReadBytes.WithLabelValues(clientIP, path, version).Add(float64(data.Size))
+				nfs4ReadOperations.WithLabelValues(clientIP, path, version).Inc()
+			}
+		} else if data.Version == 3 {
+			// NFS v3 metrics (without path)
+			if data.Op == 1 {
+				op = "WRITE"
+				nfs3WriteBytes.WithLabelValues(clientIP, version).Add(float64(data.Size))
+				nfs3WriteOperations.WithLabelValues(clientIP, version).Inc()
+			} else {
+				nfs3ReadBytes.WithLabelValues(clientIP, version).Add(float64(data.Size))
+				nfs3ReadOperations.WithLabelValues(clientIP, version).Inc()
+			}
 		}
 
-		fmt.Printf("NFS %s | Client: %s | Size: %d bytes | Path: %s\n", op, clientIP, data.Size, path)
+		fmt.Printf("NFS %s | Client: %s | Size: %d bytes | Path: %s | Version: %s\n", op, clientIP, data.Size, path, version)
 	}
 }
