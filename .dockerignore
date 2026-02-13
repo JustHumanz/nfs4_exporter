@@ -1,5 +1,4 @@
 # Docker ignore patterns
-.git
 .gitignore
 .gitmodules
 README.md

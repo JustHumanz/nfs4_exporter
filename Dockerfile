@@ -30,9 +30,10 @@ ENV PATH="${GOPATH}/bin:${PATH}"
 
 # Set working directory
 WORKDIR /build
+COPY . .
 
-# Copy libbpf submodule
-COPY libbpf libbpf
+# RUN submodule update --init --recursive
+RUN git submodule update --init --recursive
 
 # Build libbpf
 WORKDIR /build/libbpf/src
@@ -42,8 +43,6 @@ RUN make
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
-
-COPY . .
 
 # Generate vmlinux.h if not present
 RUN if [ ! -f vmlinux.h ]; then \
