@@ -29,26 +29,8 @@ struct svc_export {
 	struct path		ex_path;
 };
 
-struct knfsd_fh {
-	unsigned int	fh_size;	/*
-					 * Points to the current size while
-					 * building a new file handle.
-					 */
-	union {
-		char			fh_raw[NFS4_FHSIZE];
-		struct {
-			u8		fh_version;	/* == 1 */
-			u8		fh_auth_type;	/* deprecated */
-			u8		fh_fsid_type;
-			u8		fh_fileid_type;
-			u32		fh_fsid[]; /* flexible-array member */
-		};
-	};
-};
-
-
 typedef struct svc_fh {
-	struct knfsd_fh		fh_handle;	/* FH data */
+    char fh_handle[4 + NFS4_FHSIZE];
 	int			fh_maxsize;	/* max size for fh_handle */
 	struct dentry *		fh_dentry;	/* validated dentry */
 	struct svc_export *	fh_export;	/* export pointer */
