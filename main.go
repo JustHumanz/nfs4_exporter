@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
@@ -83,11 +84,30 @@ var (
 )
 
 type DataT struct {
-	Op   uint32
-	Size uint32
-	Addr uint32
+	Op      uint32
+	Size    uint32
+	Addr    uint32
 	Version uint32
-	Path [64]byte
+	Path    [4][16]byte
+}
+
+func PathParts(d DataT) string {
+	parts := make([]string, 0, 4)
+	for _, chunk := range d.Path {
+		n := bytes.IndexByte(chunk[:], 0)
+		if n < 0 {
+			n = len(chunk)
+		}
+		if n > 0 {
+			parts = append(parts, string(chunk[:n]))
+		}
+	}
+
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+
+	return "/" + strings.Join(parts[1:], "/")
 }
 
 func main() {
@@ -113,7 +133,6 @@ func main() {
 	}
 	defer kpRead.Close()
 	log.Println("Attached kprobe to nfsd4_read")
-
 
 	// Attach kprobe for nfsd3_proc_write
 	kpNfsd3Write, err := link.Kprobe("nfsd3_proc_write", objs.KprobeNfsd3ProcWrite, nil)
@@ -183,21 +202,22 @@ func main() {
 		ip := net.IPv4(byte(data.Addr), byte(data.Addr>>8), byte(data.Addr>>16), byte(data.Addr>>24))
 
 		// Extract path (null-terminated string)
-		pathLen := 0
-		for i, b := range data.Path {
-			if b == 0 {
-				pathLen = i
-				break
-			}
-		}
-		path := string(data.Path[:pathLen])
+		//pathLen := 0
+		//for i, b := range data.Path {
+		//	if b == 0 {
+		//		pathLen = i
+		//		break
+		//	}
+		//}
+		path := PathParts(data)
 
 		// Determine operation and record metrics
 		op := "READ"
 		clientIP := ip.String()
 		version := fmt.Sprintf("%d", data.Version)
-		
-		if data.Version == 4 {
+
+		switch data.Version {
+		case 4:
 			// NFS v4 metrics (with path)
 			if data.Op == 1 {
 				op = "WRITE"
@@ -207,7 +227,7 @@ func main() {
 				nfs4ReadBytes.WithLabelValues(clientIP, path, version).Add(float64(data.Size))
 				nfs4ReadOperations.WithLabelValues(clientIP, path, version).Inc()
 			}
-		} else if data.Version == 3 {
+		case 3:
 			// NFS v3 metrics (without path)
 			if data.Op == 1 {
 				op = "WRITE"

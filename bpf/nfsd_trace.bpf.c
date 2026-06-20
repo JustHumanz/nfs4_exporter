@@ -22,16 +22,6 @@
 
 #define NFS4_FHSIZE		128
 
-struct nfsd4_fs_location {
-	char *hosts; /* colon separated list of hosts */
-	char *path;  /* slash separated list of path components */
-};
-
-struct nfsd4_fs_locations {
-	uint32_t locations_count;
-	struct nfsd4_fs_location *locations;
-};
-
 struct svc_export {
 	struct cache_head	h;
 	struct auth_domain *	ex_client;
@@ -126,7 +116,7 @@ struct data_t {
     u32 size;
     u32 addr4;
     u32 version;
-    char path[64];
+    char path[4][16];
 };
 
 struct {
@@ -159,11 +149,18 @@ static __always_inline int trace_rw(struct pt_regs *ctx,struct svc_rqst *rqstp, 
             bpf_probe_read_kernel(&expath, sizeof(expath), &fh_export->ex_path);
             struct dentry *de = NULL;
             bpf_probe_read_kernel(&de, sizeof(de), &expath.dentry);
-            struct dentry d = {};
-            bpf_probe_read_kernel(&d, sizeof(d), de);
-            struct qstr q = {};
-            bpf_probe_read_kernel(&q, sizeof(q), &d.d_name);
-            bpf_probe_read_kernel_str(&data.path, sizeof(data.path), q.name);
+
+            for (int i = 0; i < 3; i++) {
+                struct dentry *parent;
+                struct qstr d_name;
+
+                bpf_core_read(&d_name, sizeof(d_name), &de->d_name);
+                bpf_probe_read_kernel_str(data.path[i], sizeof(data.path[i]), d_name.name);
+                bpf_core_read(&parent, sizeof(parent), &de->d_parent);
+                if (parent == de)  // IS_ROOT()
+                    break;
+                de = parent;
+            }            
         }
 
         bpf_printk("NFS OP %d size: %d version: %d\n", data.op, data.size, data.version);
