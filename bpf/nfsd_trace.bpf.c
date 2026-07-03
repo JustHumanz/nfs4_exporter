@@ -2,156 +2,108 @@
 #include "vmlinux.h"
 #include "bpf_core_read.h"
 #include "bpf_tracing.h"
-
-/* use AF_INET value here to avoid pulling in uapi headers that conflict
- * with vmlinux.h during compilation
- */
-#ifndef AF_INET
-#define AF_INET 2
-#endif
-
-#define NFS4_VER 4
-#define NFS3_VER 3
-#define OP_WRITE 1
-#define OP_READ 0
-#define MAX_SECINFO_LIST 8
-
-/* note: we rely on vmlinux.h for kernel type definitions; do not include
- * kernel headers directly to avoid type redefinition conflicts with vmlinux.h
- */
-
-#define NFS4_FHSIZE		128
-
-struct svc_export {
-	struct cache_head	h;
-	struct auth_domain *	ex_client;
-	int			ex_flags;
-	struct path		ex_path;
-};
-
-typedef struct svc_fh {
-    char fh_handle[4 + NFS4_FHSIZE];
-	int			fh_maxsize;	/* max size for fh_handle */
-	struct dentry *		fh_dentry;	/* validated dentry */
-	struct svc_export *	fh_export;	/* export pointer */
-	bool			fh_want_write;	/* remount protection taken */
-	bool			fh_no_wcc;	/* no wcc data needed */
-	bool			fh_no_atomic_attr;
-						/*
-						 * wcc data is not atomic with
-						 * operation
-						 */
-	int			fh_flags;	/* FH flags */
-	bool			fh_post_saved;	/* post-op attrs saved */
-	bool			fh_pre_saved;	/* pre-op attrs saved */
-
-	/* Pre-op attributes saved when inode is locked */
-	__u64			fh_pre_size;	/* size before operation */
-	struct timespec64	fh_pre_mtime;	/* mtime before oper */
-	struct timespec64	fh_pre_ctime;	/* ctime before oper */
-	/*
-	 * pre-op nfsv4 change attr: note must check IS_I_VERSION(inode)
-	 *  to find out if it is valid.
-	 */
-	u64			fh_pre_change;
-
-	/* Post-op attributes saved in fh_fill_post_attrs() */
-	struct kstat		fh_post_attr;	/* full attrs after operation */
-	u64			fh_post_change; /* nfsv4 change; see above */
-} svc_fh;
-
-struct nfsd4_compound_state {
-	struct svc_fh		current_fh;
-};
-
-struct nfsd4_write {
-    char           wr_stateid[16]; // stateid_t
-    u64            wr_offset;
-    u32            wr_stable_how;
-    u32            wr_buflen;
-};
-
-// For nfsd4_read
-struct nfsd4_read {
-    char rd_stateid[16];
-    u64  rd_offset;
-    u32  rd_length;
-};
-
-struct nfsd3_readargs {
-	struct svc_fh		fh;
-	__u64			offset;
-	__u32			count;
-};
-
-struct nfsd3_writeargs {
-	svc_fh			fh;
-	__u64			offset;
-	__u32			count;
-	int			stable;
-	__u32			len;
-	struct xdr_buf		payload;
-};
+#include "bpf_helpers.h"
+#include "nfsd_trace.h"
 
 struct data_t {
-    u32 op;       // 0 = read, 1 = write
+    u32 op;
     u32 size;
     u32 addr4;
+    u16 prt;
     u32 version;
-    char path[4][16];
+    char path[MAX_PATH_COMPONENTS][COMPONENT_LEN]; // 16 x 24 = 384 bytes
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(u32));
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
 } events SEC(".maps");
 
-static __always_inline int trace_rw(struct pt_regs *ctx,struct svc_rqst *rqstp, struct svc_export *fh_export,const void *buflen, u32 op, u32 version)
+struct mount___local {
+    struct hlist_node mnt_hash;
+    struct mount___local *mnt_parent;
+    struct dentry *mnt_mountpoint;
+    struct vfsmount mnt;
+} __attribute__((preserve_access_index));
+
+static __always_inline void build_path(struct dentry *dentry, struct vfsmount *vfsmnt,
+                                        char comp[MAX_PATH_COMPONENTS][COMPONENT_LEN])
 {
-    struct data_t data = {};
+    u8 n = 0;
+
+    #pragma unroll
+    for (int i = 0; i < MAX_PATH_COMPONENTS; i++) {
+
+        #pragma unroll
+        for (int j = 0; j < MAX_MOUNT_HOPS; j++) {
+            struct dentry *mnt_root = BPF_CORE_READ(vfsmnt, mnt_root);
+            if (dentry != mnt_root)
+                break;
+
+            struct mount___local *real_mnt =
+                (void *)vfsmnt - offsetof(struct mount___local, mnt);
+            struct mount___local *parent_mnt;
+            struct dentry *mountpoint;
+            bpf_core_read(&parent_mnt, sizeof(parent_mnt), &real_mnt->mnt_parent);
+            bpf_core_read(&mountpoint, sizeof(mountpoint), &real_mnt->mnt_mountpoint);
+            if (parent_mnt == real_mnt)
+                break;
+            dentry = mountpoint;
+            vfsmnt = &parent_mnt->mnt;
+        }
+
+        struct dentry *parent = BPF_CORE_READ(dentry, d_parent);
+        if (parent == dentry)
+            break;
+
+        const unsigned char *name_ptr = BPF_CORE_READ(dentry, d_name.name);
+
+        u8 idx = n & (MAX_PATH_COMPONENTS - 1);
+        bpf_probe_read_kernel_str(comp[idx], COMPONENT_LEN, name_ptr);
+        n++;
+
+        dentry = parent;
+    }
+}
+
+static __always_inline int trace_rw(struct pt_regs *ctx, struct svc_rqst *rqstp,
+                                     struct svc_export *fh_export, struct dentry *fh_dentry,
+                                     const void *buflen, u32 op, u32 version)
+{
     struct __kernel_sockaddr_storage remote = {};
     bpf_probe_read_kernel(&remote, sizeof(remote), &rqstp->rq_addr);
 
     u16 family = 0;
     bpf_probe_read_kernel(&family, sizeof(family), &remote.ss_family);
-    if (family == AF_INET) {
-        // This is OP for READ or WRITE
-        data.op = op;
-        data.version = version;
-        bpf_probe_read_kernel(&data.size, sizeof(data.size), buflen);
+    if (family != AF_INET)
+        return 0;
 
-        // Find the client ip addr
-        struct sockaddr_in *sin = (struct sockaddr_in *)&remote;
-        bpf_probe_read_kernel(&data.addr4, sizeof(data.addr4), &sin->sin_addr.s_addr);
+    struct data_t *data = bpf_ringbuf_reserve(&events, sizeof(*data), 0);
+    if (!data)
+        return 0;
 
-        if (version == 4) {
-            // Get the nfs mount path
-            struct path expath = {};
-            bpf_probe_read_kernel(&expath, sizeof(expath), &fh_export->ex_path);
-            struct dentry *de = NULL;
-            bpf_probe_read_kernel(&de, sizeof(de), &expath.dentry);
+    __builtin_memset(data, 0, sizeof(*data));
+    data->op = op;
+    data->version = version;
+    bpf_probe_read_kernel(&data->size, sizeof(data->size), buflen);
 
-            for (int i = 0; i < 3; i++) {
-                struct dentry *parent;
-                struct qstr d_name;
+    struct sockaddr_in *sin = (struct sockaddr_in *)&remote;
+    bpf_probe_read_kernel(&data->addr4, sizeof(data->addr4), &sin->sin_addr.s_addr);
+    bpf_probe_read_kernel(&data->prt, sizeof(data->prt), &sin->sin_port);
 
-                bpf_core_read(&d_name, sizeof(d_name), &de->d_name);
-                bpf_probe_read_kernel_str(data.path[i], sizeof(data.path[i]), d_name.name);
-                bpf_core_read(&parent, sizeof(parent), &de->d_parent);
-                if (parent == de)  // IS_ROOT()
-                    break;
-                de = parent;
-            }            
-        }
-
-        bpf_printk("NFS OP %d size: %d version: %d\n", data.op, data.size, data.version);
+    if (fh_export && fh_dentry) {
+        struct vfsmount *vfsmnt = NULL;
+        bpf_probe_read_kernel(&vfsmnt, sizeof(vfsmnt), &fh_export->ex_path.mnt);
+        if (vfsmnt)
+            build_path(fh_dentry, vfsmnt, data->path);
     }
 
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &data, sizeof(data));
+    bpf_printk("NFS OP %d size: %d version: %d\n",
+               data->op, data->size, data->version);
+
+    bpf_ringbuf_submit(data, 0);
     return 0;
 }
-
 // Wrapper for nfsd_write
 SEC("kprobe/nfsd4_write")
 int kprobe__nfsd4_write(struct pt_regs *ctx)
@@ -159,10 +111,13 @@ int kprobe__nfsd4_write(struct pt_regs *ctx)
     struct svc_rqst *rqstp = (struct svc_rqst *)PT_REGS_PARM1(ctx);
     struct nfsd4_compound_state *cstate = (struct nfsd4_compound_state *)PT_REGS_PARM2(ctx);
     struct nfsd4_write *write = (struct nfsd4_write *)PT_REGS_PARM3(ctx);
-    struct svc_export *	fh_export = NULL;
-    bpf_probe_read_kernel(&fh_export, sizeof(fh_export), &cstate->current_fh.fh_export);
 
-    return trace_rw(ctx, rqstp, fh_export, &write->wr_buflen,OP_WRITE,NFS4_VER);
+    struct svc_export *	fh_export = NULL;
+    struct dentry *fh_dentry = NULL;
+    bpf_probe_read_kernel(&fh_export, sizeof(fh_export), &cstate->current_fh.fh_export);
+    bpf_probe_read_kernel(&fh_dentry, sizeof(fh_dentry), &cstate->current_fh.fh_dentry);
+
+    return trace_rw(ctx, rqstp, fh_export, fh_dentry, &write->wr_buflen,OP_WRITE,NFS4_VER);
 }
 
 // Wrapper for nfsd_read
@@ -175,42 +130,123 @@ int kprobe__nfsd4_read(struct pt_regs *ctx)
     struct nfsd4_read *read = (struct nfsd4_read *)u;
     
     struct svc_export *fh_export = NULL;
+    struct dentry *fh_dentry = NULL;    
     bpf_probe_read_kernel(&fh_export, sizeof(fh_export), &cstate->current_fh.fh_export);
-    return trace_rw(ctx, rqstp, fh_export, &read->rd_length, OP_READ, NFS4_VER);
+    bpf_probe_read_kernel(&fh_dentry, sizeof(fh_dentry), &cstate->current_fh.fh_dentry);
+
+    return trace_rw(ctx, rqstp, fh_export, fh_dentry, &read->rd_length, OP_READ, NFS4_VER);
 }
 
 // NFS 3 support
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, u64);
+    __type(value, struct svc_rqst *);
+} rqstp_map SEC(".maps");
 
 // Wrapper for nfsd3_proc_write
 SEC("kprobe/nfsd3_proc_write")
-int kprobe__nfsd3_proc_write(struct pt_regs *ctx)
+int BPF_KPROBE(kprobe_nfsd3_proc_write, struct svc_rqst *rqstp)
+{   
+    struct nfsd3_writeres *resp = NULL;
+    bpf_probe_read_kernel(&resp, sizeof(resp), &rqstp->rq_resp);
+    if (!resp) {
+        return 0;
+    }
+    // Using bitwise shift to differentiate between read and write operations in the map key
+    u64 pid_tgid = bpf_get_current_pid_tgid() >> OP_WRITE;
+    bpf_map_update_elem(&rqstp_map, &pid_tgid, &rqstp, BPF_ANY);
+    return 0;
+}
+
+SEC("kretprobe/nfsd3_proc_write")
+int BPF_KRETPROBE(kretprobe_nfsd3_proc_write)
 {
-    __u32 count = 0;
-    struct svc_rqst *rqstp = (struct svc_rqst *)PT_REGS_PARM1(ctx);
-    struct nfsd3_writeargs *argp = NULL;
-    struct svc_export *fh_export = NULL;
-    bpf_probe_read_kernel(&argp, sizeof(argp), &rqstp->rq_argp);
-    bpf_probe_read_kernel(&count, sizeof(count), &argp->count); 
-    bpf_probe_read_kernel(&fh_export, sizeof(fh_export), &argp->fh.fh_export);
-    return trace_rw(ctx, rqstp, fh_export, &count, OP_WRITE,NFS3_VER);
+ 
+    u64 pid_tgid = bpf_get_current_pid_tgid() >> OP_WRITE;
+    struct svc_rqst **rqstp_ptr = bpf_map_lookup_elem(&rqstp_map, &pid_tgid);
+    if (!rqstp_ptr) {
+        return 0;
+    }
     
+    struct svc_rqst *rqstp = *rqstp_ptr;
+    bpf_map_delete_elem(&rqstp_map, &pid_tgid);
+
+    struct nfsd3_writeres *resp = NULL;
+    if (bpf_probe_read_kernel(&resp, sizeof(resp), &rqstp->rq_resp) < 0 || !resp) {
+        return 0;
+    }
+
+    struct svc_export *fh_export = NULL;
+    long res_exp = bpf_probe_read_kernel(&fh_export, sizeof(fh_export), &resp->fh.fh_export);
+
+    // Your conditional check block
+    if (!fh_export) {
+        bpf_printk("nfsd3_proc_write: fh_export is NULL or read failed, res=%ld fh_export=%llx\n", res_exp, (u64)fh_export);
+        return 0;
+    } 
+
+    struct dentry *fh_dentry = NULL;
+    bpf_probe_read_kernel(&fh_dentry, sizeof(fh_dentry), &fh_export->ex_path.dentry);    
+    if (!fh_dentry) {
+        bpf_printk("nfsd3_proc_write: fh_dentry is NULL\n");
+        return 0;
+    }
+
+    return trace_rw((struct pt_regs *)PT_REGS_PARM1(ctx), rqstp, fh_export, fh_dentry, &resp->count, OP_WRITE, NFS3_VER);
 }
 
 // Wrapper for nfsd3_proc_read
 SEC("kprobe/nfsd3_proc_read")
-int kprobe__nfsd3_proc_read(struct pt_regs *ctx)
-{
-    __u32 count = 0;
-    struct svc_rqst *rqstp = (struct svc_rqst *)PT_REGS_PARM1(ctx);
-    struct nfsd3_readargs *argp = NULL;
-    struct svc_export *fh_export = NULL;
-    bpf_probe_read_kernel(&argp, sizeof(argp), &rqstp->rq_argp);
-    bpf_probe_read_kernel(&count, sizeof(count), &argp->count); 
-    bpf_probe_read_kernel(&fh_export, sizeof(fh_export), &argp->fh.fh_export);
-    return trace_rw(ctx, rqstp, fh_export, &count, OP_READ,NFS3_VER);
-    
+int BPF_KPROBE(kprobe_nfsd3_proc_read, struct svc_rqst *rqstp)
+{   
+    struct nfsd3_readres *resp = NULL;
+    bpf_probe_read_kernel(&resp, sizeof(resp), &rqstp->rq_resp);
+    if (!resp) {
+        return 0;
+    }
+    u64 pid_tgid = bpf_get_current_pid_tgid() >> OP_READ;
+    bpf_map_update_elem(&rqstp_map, &pid_tgid, &rqstp, BPF_ANY);
+    return 0;
 }
 
+SEC("kretprobe/nfsd3_proc_read")
+int BPF_KRETPROBE(kretprobe_nfsd3_proc_read)
+{
+ 
+    u64 pid_tgid = bpf_get_current_pid_tgid() >> OP_READ;
+    struct svc_rqst **rqstp_ptr = bpf_map_lookup_elem(&rqstp_map, &pid_tgid);
+    if (!rqstp_ptr) {
+        return 0;
+    }
+    
+    struct svc_rqst *rqstp = *rqstp_ptr;
+    bpf_map_delete_elem(&rqstp_map, &pid_tgid);
+
+    struct nfsd3_readargs *resp = NULL;
+    if (bpf_probe_read_kernel(&resp, sizeof(resp), &rqstp->rq_resp) < 0 || !resp) {
+        return 0;
+    }
+
+    struct svc_export *fh_export = NULL;
+    long res_exp = bpf_probe_read_kernel(&fh_export, sizeof(fh_export), &resp->fh.fh_export);
+
+    // Your conditional check block
+    if (!fh_export) {
+        bpf_printk("nfsd3_proc_read: fh_export is NULL or read failed, res=%ld fh_export=%llx\n", res_exp, (u64)fh_export);
+        return 0;
+    } 
+
+    struct dentry *fh_dentry = NULL;
+    bpf_probe_read_kernel(&fh_dentry, sizeof(fh_dentry), &fh_export->ex_path.dentry);    
+    if (!fh_dentry) {
+        bpf_printk("nfsd3_proc_read: fh_dentry is NULL\n");
+        return 0;
+    }
+
+    return trace_rw((struct pt_regs *)PT_REGS_PARM1(ctx), rqstp, fh_export, fh_dentry, &resp->count, OP_READ, NFS3_VER);
+}
 
 /* metadata */
 char LICENSE[] SEC("license") = "GPL";

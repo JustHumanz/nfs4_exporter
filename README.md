@@ -129,50 +129,31 @@ The tracer exposes the following metrics at `http://localhost:2112/metrics`:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `nfs4_read_bytes_total` | Counter | `client`, `path`, `version` | Total bytes read from NFS v4 |
-| `nfs4_write_bytes_total` | Counter | `client`, `path`, `version` | Total bytes written to NFS v4 |
-| `nfs4_read_operations_total` | Counter | `client`, `path`, `version` | Total number of NFS v4 read operations |
-| `nfs4_write_operations_total` | Counter | `client`, `path`, `version` | Total number of NFS v4 write operations |
-| `nfs3_read_bytes_total` | Counter | `client`, `version` | Total bytes read from NFS v3 |
-| `nfs3_write_bytes_total` | Counter | `client`, `version` | Total bytes written to NFS v3 |
-| `nfs3_read_operations_total` | Counter | `client`, `version` | Total number of NFS v3 read operations |
-| `nfs3_write_operations_total` | Counter | `client`, `version` | Total number of NFS v3 write operations |
+| `nfsd_read_bytes_total` | Counter | `client`, `path`, `version` | Total bytes read from NFS |
+| `nfsd_write_bytes_total` | Counter | `client`, `path`, `version` | Total bytes written to NFS |
+| `nfsd_read_operations_total` | Counter | `client`, `path`, `version` | Total number of NFS read operations |
+| `nfsd_write_operations_total` | Counter | `client`, `path`, `version` | Total number of NFS write operations |
 
 ### Example Queries
 
-**Read throughput (bytes/sec) over 1 minute (NFS v4):**
+**Read throughput (bytes/sec) over 1 minute:**
 ```promql
-rate(nfs4_read_bytes_total[1m])
+rate(nfsd_read_bytes_total[1m])
 ```
 
-**Write throughput per client (NFS v4):**
+**Write throughput per client:**
 ```promql
-sum by (client) (rate(nfs4_write_bytes_total[1m]))
+sum by (client) (rate(nfsd_write_bytes_total[1m]))
 ```
 
-**Total I/O operations per second (NFS v4):**
+**Total I/O operations per second:**
 ```promql
-sum(rate(nfs4_read_operations_total[1m])) + sum(rate(nfs4_write_operations_total[1m]))
+sum(rate(nfsd_read_operations_total[1m])) + sum(rate(nfsd_write_operations_total[1m]))
 ```
 
-**Top paths by read traffic (NFS v4):**
+**Top paths by read traffic:**
 ```promql
-topk(5, sum by (path) (rate(nfs4_read_bytes_total[1m])))
-```
-
-**Read throughput (bytes/sec) over 1 minute (NFS v3):**
-```promql
-rate(nfs3_read_bytes_total[1m])
-```
-
-**Write throughput per client (NFS v3):**
-```promql
-sum by (client) (rate(nfs3_write_bytes_total[1m]))
-```
-
-**Total I/O operations per second (NFS v3):**
-```promql
-sum(rate(nfs3_read_operations_total[1m])) + sum(rate(nfs3_write_operations_total[1m]))
+topk(5, sum by (path) (rate(nfsd_read_bytes_total[1m])))
 ```
 
 ### Scrape Configuration

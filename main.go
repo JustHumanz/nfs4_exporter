@@ -9,11 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/perf"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -23,91 +24,94 @@ import (
 
 var (
 	// NFS v4 metrics (with path)
-	nfs4ReadBytes = promauto.NewCounterVec(
+	nfsReadBytes = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs4_read_bytes_total",
+			Name: "nfsd_read_bytes_total",
 			Help: "Total bytes read from NFS v4 by client and path",
 		},
 		[]string{"client", "path", "version"},
 	)
-	nfs4WriteBytes = promauto.NewCounterVec(
+	nfsWriteBytes = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs4_write_bytes_total",
+			Name: "nfsd_write_bytes_total",
 			Help: "Total bytes written to NFS v4 by client and path",
 		},
 		[]string{"client", "path", "version"},
 	)
-	nfs4ReadOperations = promauto.NewCounterVec(
+	nfsReadOperations = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs4_read_operations_total",
+			Name: "nfsd_read_operations_total",
 			Help: "Total number of NFS v4 read operations by client and path",
 		},
 		[]string{"client", "path", "version"},
 	)
-	nfs4WriteOperations = promauto.NewCounterVec(
+	nfsWriteOperations = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "nfs4_write_operations_total",
+			Name: "nfsd_write_operations_total",
 			Help: "Total number of NFS v4 write operations by client and path",
 		},
 		[]string{"client", "path", "version"},
 	)
 
-	// NFS v3 metrics (without path)
-	nfs3ReadBytes = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "nfs3_read_bytes_total",
-			Help: "Total bytes read from NFS v3 by client",
-		},
-		[]string{"client", "version"},
-	)
-	nfs3WriteBytes = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "nfs3_write_bytes_total",
-			Help: "Total bytes written to NFS v3 by client",
-		},
-		[]string{"client", "version"},
-	)
-	nfs3ReadOperations = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "nfs3_read_operations_total",
-			Help: "Total number of NFS v3 read operations by client",
-		},
-		[]string{"client", "version"},
-	)
-	nfs3WriteOperations = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "nfs3_write_operations_total",
-			Help: "Total number of NFS v3 write operations by client",
-		},
-		[]string{"client", "version"},
-	)
+	//
+	max_pathStr    = os.Getenv("MAX_DEPTH_PATH")
+	MAX_DEPTH_PATH = 2
 )
 
+// DataT mirrors struct data_t in the BPF program.
+// IMPORTANT: field order and sizes must match the C struct exactly,
+// including any implicit padding the compiler inserts for alignment.
 type DataT struct {
 	Op      uint32
 	Size    uint32
-	Addr    uint32
+	Addr4   uint32
+	Prt     uint16
+	_       uint16 // padding to keep Version 4-byte aligned
 	Version uint32
-	Path    [4][16]byte
+	Path    [16][24]byte
 }
 
-func PathParts(d DataT) string {
-	parts := make([]string, 0, 4)
+func (d *DataT) pathString() string {
+	return pathString(d)
+}
+
+func pathString(d *DataT) string {
+	parts := make([]string, 0, len(d.Path))
+
 	for _, chunk := range d.Path {
-		n := bytes.IndexByte(chunk[:], 0)
-		if n < 0 {
-			n = len(chunk)
+		if chunk[0] == 0 {
+			break // first empty slot marks the end of real components
 		}
-		if n > 0 {
-			parts = append(parts, string(chunk[:n]))
+		end := bytes.IndexByte(chunk[:], 0)
+		if end < 0 {
+			end = len(chunk)
 		}
+		parts = append(parts, string(chunk[:end]))
 	}
 
+	// components were captured leaf -> root; reverse for root -> leaf
 	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
 		parts[i], parts[j] = parts[j], parts[i]
 	}
 
-	return "/" + strings.Join(parts[1:], "/")
+	if len(parts) == 0 {
+		return "/"
+	}
+
+	if MAX_DEPTH_PATH >= len(parts) {
+		return "/" + strings.Join(parts, "/")
+	}
+	return "/" + strings.Join(parts[:MAX_DEPTH_PATH], "/")
+}
+
+func init() {
+	if max_pathStr != "" {
+		var err error
+		MAX_DEPTH_PATH, err = strconv.Atoi(max_pathStr)
+		if err != nil {
+			log.Fatalf("Invalid MAX_DEPTH_PATH, must be an integer: %v", err)
+		}
+	}
 }
 
 func main() {
@@ -142,6 +146,14 @@ func main() {
 	defer kpNfsd3Write.Close()
 	log.Println("Attached kprobe to nfsd3_proc_write")
 
+	// Attach kretprobe for nfsd3_proc_write
+	kpNfsd3WriteRet, err := link.Kretprobe("nfsd3_proc_write", objs.KretprobeNfsd3ProcWrite, nil)
+	if err != nil {
+		log.Fatalf("opening kretprobe nfsd3_proc_write: %v", err)
+	}
+	defer kpNfsd3WriteRet.Close()
+	log.Println("Attached kretprobe to nfsd3_proc_write")
+
 	// Attach kprobe for nfsd3_proc_read
 	kpNfsd3Read, err := link.Kprobe("nfsd3_proc_read", objs.KprobeNfsd3ProcRead, nil)
 	if err != nil {
@@ -150,10 +162,18 @@ func main() {
 	defer kpNfsd3Read.Close()
 	log.Println("Attached kprobe to nfsd3_proc_read")
 
-	// Open a perf event reader from the events map
-	rd, err := perf.NewReader(objs.Events, 4096)
+	// Attach kretprobe for nfsd3_proc_read
+	kpNfsd3ReadRet, err := link.Kretprobe("nfsd3_proc_read", objs.KretprobeNfsd3ProcRead, nil)
 	if err != nil {
-		log.Fatalf("creating perf reader: %v", err)
+		log.Fatalf("opening kretprobe nfsd3_proc_read: %v", err)
+	}
+	defer kpNfsd3ReadRet.Close()
+	log.Println("Attached kretprobe to nfsd3_proc_read")
+
+	// Open a ringbuf reader from the events map
+	rd, err := ringbuf.NewReader(objs.Events)
+	if err != nil {
+		log.Fatalf("creating ringbuf reader: %v", err)
 	}
 	defer rd.Close()
 
@@ -175,6 +195,7 @@ func main() {
 	go func() {
 		<-stop
 		log.Println("\nReceived signal, exiting...")
+		rd.Close() // unblocks rd.Read() below so the program can exit cleanly
 		os.Exit(0)
 	}()
 
@@ -182,13 +203,12 @@ func main() {
 	for {
 		record, err := rd.Read()
 		if err != nil {
-			log.Printf("reading from perf reader: %v", err)
-			continue
-		}
-
-		if record.LostSamples != 0 {
-			log.Printf("lost %d samples", record.LostSamples)
-			continue
+			if err == ringbuf.ErrClosed {
+				// reader was closed during shutdown, exit the loop quietly
+				return
+			}
+			log.Printf("reading from ringbuf: %v", err)
+			break
 		}
 
 		// Parse the event
@@ -199,44 +219,22 @@ func main() {
 		}
 
 		// Convert IP address
-		ip := net.IPv4(byte(data.Addr), byte(data.Addr>>8), byte(data.Addr>>16), byte(data.Addr>>24))
-
-		// Extract path (null-terminated string)
-		//pathLen := 0
-		//for i, b := range data.Path {
-		//	if b == 0 {
-		//		pathLen = i
-		//		break
-		//	}
-		//}
-		path := PathParts(data)
+		ip := net.IPv4(byte(data.Addr4), byte(data.Addr4>>8), byte(data.Addr4>>16), byte(data.Addr4>>24))
+		path := data.pathString()
 
 		// Determine operation and record metrics
 		op := "READ"
 		clientIP := ip.String()
 		version := fmt.Sprintf("%d", data.Version)
 
-		switch data.Version {
-		case 4:
-			// NFS v4 metrics (with path)
-			if data.Op == 1 {
-				op = "WRITE"
-				nfs4WriteBytes.WithLabelValues(clientIP, path, version).Add(float64(data.Size))
-				nfs4WriteOperations.WithLabelValues(clientIP, path, version).Inc()
-			} else {
-				nfs4ReadBytes.WithLabelValues(clientIP, path, version).Add(float64(data.Size))
-				nfs4ReadOperations.WithLabelValues(clientIP, path, version).Inc()
-			}
-		case 3:
-			// NFS v3 metrics (without path)
-			if data.Op == 1 {
-				op = "WRITE"
-				nfs3WriteBytes.WithLabelValues(clientIP, version).Add(float64(data.Size))
-				nfs3WriteOperations.WithLabelValues(clientIP, version).Inc()
-			} else {
-				nfs3ReadBytes.WithLabelValues(clientIP, version).Add(float64(data.Size))
-				nfs3ReadOperations.WithLabelValues(clientIP, version).Inc()
-			}
+		switch data.Op {
+		case 1:
+			op = "WRITE"
+			nfsWriteBytes.WithLabelValues(clientIP, path, version).Add(float64(data.Size))
+			nfsWriteOperations.WithLabelValues(clientIP, path, version).Inc()
+		default:
+			nfsReadBytes.WithLabelValues(clientIP, path, version).Add(float64(data.Size))
+			nfsReadOperations.WithLabelValues(clientIP, path, version).Inc()
 		}
 
 		fmt.Printf("NFS %s | Client: %s | Size: %d bytes | Path: %s | Version: %s\n", op, clientIP, data.Size, path, version)
