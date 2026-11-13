@@ -68,7 +68,7 @@ type DataT struct {
 	Prt     uint16
 	_       uint16 // padding to keep Version 4-byte aligned
 	Version uint32
-	Path    [16][24]byte
+	Path    [16][128]byte
 }
 
 func (d *DataT) pathString() string {

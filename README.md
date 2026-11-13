@@ -169,6 +169,20 @@ scrape_configs:
 
 ## Development
 
+### Lint
+
+CI runs Go vet and Clang's static analyzer. After initializing the libbpf
+submodule and obtaining `vmlinux.h`, run the same checks with Clang 18:
+
+```bash
+BPF2GO_CC=clang-18 go generate ./...
+go vet ./...
+clang-18 --analyze -Werror -Xanalyzer -analyzer-werror \
+  -D__BPF_TRACING__ -D__TARGET_ARCH_x86 -O2 -g -target bpf -nostdinc \
+  -isystem /usr/lib/llvm-18/lib/clang/18/include \
+  -I. -I./libbpf/src -I./libbpf/include bpf/nfsd_trace.bpf.c -o /dev/null
+```
+
 ### Regenerate BPF code
 
 If you modify `bpf/nfsd_trace.bpf.c`:
