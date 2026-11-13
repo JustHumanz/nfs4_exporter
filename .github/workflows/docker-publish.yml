@@ -10,11 +10,12 @@ permissions:
 
 env:
   REGISTRY: hub.humanz.moe
-  IMAGE_NAME: exporter/nfs4-exporter
+  IMAGE_NAME: library/nfs4-exporter
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    environment: Builder
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,6 +29,12 @@ jobs:
         # Buildx is a Docker CLI plugin for extended build capabilities,
         # including multi-platform builds.
         uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
