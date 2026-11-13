@@ -32,9 +32,6 @@ ENV PATH="${GOPATH}/bin:${PATH}"
 WORKDIR /build
 COPY . .
 
-# RUN submodule update --init --recursive
-RUN git submodule update --init --recursive
-
 # Build libbpf
 WORKDIR /build/libbpf/src
 RUN make
