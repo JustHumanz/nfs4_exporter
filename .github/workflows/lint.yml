@@ -1,0 +1,46 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install BPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+
+      - name: Download kernel types
+        run: curl --fail --location --retry 3 https://storage.humanz.moe/tools/vmlinux.h --output vmlinux.h
+
+      - name: Generate BPF bindings
+        env:
+          BPF2GO_CC: clang-18
+        run: go generate ./...
+
+      - name: Lint Go
+        run: go vet ./...
+
+      - name: Lint C
+        run: |
+          clang-18 --analyze -Werror -Xanalyzer -analyzer-werror \
+            -D__BPF_TRACING__ -D__TARGET_ARCH_x86 \
+            -O2 -g -target bpf -nostdinc \
+            -isystem /usr/lib/llvm-18/lib/clang/18/include \
+            -I. -I./libbpf/src -I./libbpf/include bpf/nfsd_trace.bpf.c -o /dev/null
