@@ -11,7 +11,7 @@ struct data_t {
     u32 addr4;
     u16 prt;
     u32 version;
-    char path[MAX_PATH_COMPONENTS][COMPONENT_LEN]; // 16 x 24 = 384 bytes
+    char path[MAX_PATH_COMPONENTS][COMPONENT_LEN]; // 16 x 64 = 2048 bytes
 };
 
 struct {
@@ -82,7 +82,10 @@ static __always_inline int trace_rw(struct pt_regs *ctx, struct svc_rqst *rqstp,
     if (!data)
         return 0;
 
-    __builtin_memset(data, 0, sizeof(*data));
+    volatile u32 *data_words = (volatile u32 *)data;
+    #pragma unroll
+    for (int i = 0; i < sizeof(*data) / sizeof(u32); i++)
+        data_words[i] = 0;
     data->op = op;
     data->version = version;
     bpf_probe_read_kernel(&data->size, sizeof(data->size), buflen);

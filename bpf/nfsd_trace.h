@@ -20,7 +20,7 @@
 
 #define NFS4_FHSIZE		128
 #define MAX_PATH_COMPONENTS 16
-#define COMPONENT_LEN 24
+#define COMPONENT_LEN 128
 #define MAX_MOUNT_HOPS 8
 
 struct svc_export {
